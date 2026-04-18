@@ -134,11 +134,25 @@ namespace Glowplus
             // --- 3. 座標計算とクリッピング判定 ---
             var bounds = dc.GetImageLocalBounds(this.input);
 
-            if (float.IsInfinity(bounds.Left) || Math.Abs(bounds.Right - bounds.Left) > 500000)
+            // ① 無限大の場合はプロジェクトサイズにフォールバック（背景アイテム等への対応・既存のまま）
+            if (float.IsInfinity(bounds.Left) || float.IsInfinity(bounds.Right) || Math.Abs(bounds.Right - bounds.Left) > 500000)
             {
                 float halfW = projectWidth / 2.0f;
                 float halfH = projectHeight / 2.0f;
                 bounds = new Vortice.RawRectF(-halfW, -halfH, halfW, halfH);
+            }
+
+            // ★② 新規追加：バグ回避（アイテムサイズが0、つまり何も描画されていない場合）
+            if (float.IsNaN(bounds.Left) || (bounds.Right - bounds.Left) <= 0.1f || (bounds.Bottom - bounds.Top) <= 0.1f)
+            {
+                // エフェクトをかけずに、安全に入力をパススルーして終わる
+                using (var floodOut = _padFlood.Output)
+                {
+                    _padComposite.SetInput(0, floodOut, true);
+                }
+                _padComposite.SetInput(1, this.input, true);
+                _lastOutput = _padComposite.Output;
+                return effectDescription.DrawDescription;
             }
 
             // 光の広がり計算
@@ -163,31 +177,23 @@ namespace Glowplus
 
             if (fixToOriginalSize)
             {
-                // 【新規追加】枠サイズに固定：パディングを追加せず、入力画像のサイズのままにする
                 finalHalfWidth = inputHalfW;
                 finalHalfHeight = inputHalfH;
-                maxTextureSize = 8192.0f; // 制限は緩めに設定
+                maxTextureSize = 8192.0f;
             }
             else if (autoClipping)
             {
-                // 自動クリッピング (画面サイズ+α までで制限)
                 float maxAllowedDimension = Math.Max(projectWidth, projectHeight) * 1.5f;
-
                 finalHalfWidth = Math.Min(inputHalfW + safePadding, maxAllowedDimension / 2.0f);
                 finalHalfHeight = Math.Min(inputHalfH + safePadding, maxAllowedDimension / 2.0f);
-
                 if (currentQualityMode == 0) maxTextureSize = 512f;
                 else if (currentQualityMode == 2) maxTextureSize = 2048.0f;
                 else maxTextureSize = 1024.0f;
             }
             else
             {
-                // クリッピングなし (ハードウェア制限まで許可)
-                finalHalfWidth = inputHalfW + safePadding;
-                finalHalfHeight = inputHalfH + safePadding;
-
-                finalHalfWidth = Math.Min(finalHalfWidth, ABSOLUTE_MAX_HALF_DIM);
-                finalHalfHeight = Math.Min(finalHalfHeight, ABSOLUTE_MAX_HALF_DIM);
+                finalHalfWidth = Math.Min(inputHalfW + safePadding, ABSOLUTE_MAX_HALF_DIM);
+                finalHalfHeight = Math.Min(inputHalfH + safePadding, ABSOLUTE_MAX_HALF_DIM);
                 maxTextureSize = 8192.0f;
             }
 
@@ -199,7 +205,6 @@ namespace Glowplus
             );
 
             // --- UV座標上の中心位置計算 ---
-            // YMM4のピクセル座標を、Shader用の正規化UV(0.0～1.0)に変換
             float safeWidth = safeRect.Z - safeRect.X;
             float safeHeight = safeRect.W - safeRect.Y;
             float normalizedCenterX = 0.5f + (rayCenterX / Math.Max(1.0f, safeWidth));
@@ -215,7 +220,7 @@ namespace Glowplus
             float maxDim = Math.Max(currentW, currentH);
 
             float autoDownscale = 1.0f;
-            if (maxDim > maxTextureSize) autoDownscale = maxTextureSize / maxDim;
+            if (maxDim > maxTextureSize) autoDownscale = maxTextureSize / Math.Max(1.0f, maxDim);
 
             float renderScale = 1.0f;
             if (currentQualityMode == 0) renderScale = 0.5f;
@@ -224,7 +229,7 @@ namespace Glowplus
             renderScale = Math.Min(renderScale, autoDownscale);
             renderScale = Math.Max(renderScale, 0.05f);
 
-            // 入力画像の透明パディング
+            // ★ メモリリーク修正：入力画像の透明パディング
             using (var floodOut = _padFlood.Output)
             {
                 _padComposite.SetInput(0, floodOut, true);
