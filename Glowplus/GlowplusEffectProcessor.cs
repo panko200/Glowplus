@@ -30,6 +30,10 @@ namespace Glowplus
         private GlowplusCustomEffect? _deepGlowEffect;
         private Crop? _preBlurCrop;
 
+        // 端っこ引き延ばし修正用のパディング
+        private Flood? _padFlood;
+        private Composite? _padComposite;
+
         private readonly List<PyramidLevel> _pyramidLevels = new();
         private ID2D1Image? _lastOutput;
         public ID2D1Image Output => _lastOutput!;
@@ -88,9 +92,25 @@ namespace Glowplus
             float sourceOpacity = (float)item.SourceOpacity.GetValue(frame, length, fps) / 100.0f;
             bool linear = item.LinearColor;
             var currentQualityMode = (int)item.QualityMode;
-
-            // ★追加: 自動クリッピングの設定取得
             bool autoClipping = item.AutoClipping;
+            bool fixToOriginalSize = item.FixToOriginalSize;
+
+            // ★新規取得パラメータ群
+            float chromaStyle = item.ChromaStyle == GlowplusEffect.ChromaStyleMode.Directional ? 1.0f : 0.0f;
+            float chromaAngle = (float)item.ChromaAngle.GetValue(frame, length, fps) * (float)Math.PI / 180.0f;
+            float chromaCenterX = (float)item.ChromaCenterX.GetValue(frame, length, fps);
+            float chromaCenterY = (float)item.ChromaCenterY.GetValue(frame, length, fps);
+            float chromaR = (float)item.ChromaR.GetValue(frame, length, fps) / 100.0f;
+            float chromaG = (float)item.ChromaG.GetValue(frame, length, fps) / 100.0f;
+            float chromaB = (float)item.ChromaB.GetValue(frame, length, fps) / 100.0f;
+
+            float rayStyle = item.RayStyle == GlowplusEffect.RayStyleMode.Directional ? 1.0f : 0.0f;
+            float rayAngle = (float)item.RayAngle.GetValue(frame, length, fps) * (float)Math.PI / 180.0f;
+            float rayLength = (float)item.RayLength.GetValue(frame, length, fps);
+            float rayFalloff = (float)item.RayFalloff.GetValue(frame, length, fps);
+            float rayCenterX = (float)item.RayCenterX.GetValue(frame, length, fps);
+            float rayCenterY = (float)item.RayCenterY.GetValue(frame, length, fps);
+            int raySamples = Math.Clamp((int)item.RaySamples.GetValue(frame, length, fps), 1, 256);
 
             // --- 2. インスタンス生成 ---
             try
@@ -101,6 +121,9 @@ namespace Glowplus
                 _finalSourceCrop ??= new Crop(dc);
                 _finalGlowCrop ??= new Crop(dc);
                 _preBlurCrop ??= new Crop(dc);
+
+                _padFlood ??= new Flood(dc) { Color = new Vector4(0f, 0f, 0f, 0f) };
+                _padComposite ??= new Composite(dc);
             }
             catch
             {
@@ -111,14 +134,10 @@ namespace Glowplus
             // --- 3. 座標計算とクリッピング判定 ---
             var bounds = dc.GetImageLocalBounds(this.input);
 
-            // ★修正: フォールバック座標を「画面中央原点」に変更
-            // 以前: (0, 0, W, H) -> 左上原点扱いになり、右下にズレる＆デカすぎる
-            // 今回: (-W/2, -H/2, W/2, H/2) -> 中央原点。ズレが直ります。
             if (float.IsInfinity(bounds.Left) || Math.Abs(bounds.Right - bounds.Left) > 500000)
             {
                 float halfW = projectWidth / 2.0f;
                 float halfH = projectHeight / 2.0f;
-                // 名前空間のエラー対策: Vortice.RawRectF を使用
                 bounds = new Vortice.RawRectF(-halfW, -halfH, halfW, halfH);
             }
 
@@ -127,8 +146,9 @@ namespace Glowplus
             float maxScaleFactor = (float)Math.Pow(2, steps - 1);
             float maxSpread = baseBlurSigma * 6.0f * maxScaleFactor * Math.Max(sizeX, sizeY);
 
-            // パディング
+            // 放射光のための安全マージンも追加
             float safePadding = maxSpread + 50.0f;
+            if (rayLength > 0) safePadding += Math.Max(projectWidth, projectHeight) * rayLength * 0.5f;
 
             float centerX = (bounds.Left + bounds.Right) / 2.0f;
             float centerY = (bounds.Top + bounds.Bottom) / 2.0f;
@@ -136,42 +156,39 @@ namespace Glowplus
             float inputHalfH = (bounds.Bottom - bounds.Top) / 2.0f;
 
             float finalHalfWidth, finalHalfHeight;
-
-            // テクスチャサイズの制限値
             float maxTextureSize;
 
-            if (autoClipping)
+            // ★ ハードウェア限界を考慮した絶対的な最大サイズ (直径が12000程度に収まるように)
+            float ABSOLUTE_MAX_HALF_DIM = 6000.0f;
+
+            if (fixToOriginalSize)
             {
-                // ON: 画面サイズに基づくクリッピング
+                // 【新規追加】枠サイズに固定：パディングを追加せず、入力画像のサイズのままにする
+                finalHalfWidth = inputHalfW;
+                finalHalfHeight = inputHalfH;
+                maxTextureSize = 8192.0f; // 制限は緩めに設定
+            }
+            else if (autoClipping)
+            {
+                // 自動クリッピング (画面サイズ+α までで制限)
                 float maxAllowedDimension = Math.Max(projectWidth, projectHeight) * 1.5f;
 
                 finalHalfWidth = Math.Min(inputHalfW + safePadding, maxAllowedDimension / 2.0f);
                 finalHalfHeight = Math.Min(inputHalfH + safePadding, maxAllowedDimension / 2.0f);
 
-                // ★修正点1: 制限を厳しくして、Step 5あたりの中間負荷を下げる
-                if (currentQualityMode == 0) // 軽量
-                {
-                    maxTextureSize = 512f;
-                }
-                else if (currentQualityMode == 2) // 最高品質
-                {
-                    maxTextureSize = 2048.0f; // ここぞという時だけデカくする
-                }
-                else // バランス（デフォルト）
-                {
-                    maxTextureSize = 1024.0f; // 4096だとStep5で重くなるので、2500に下げる
-                }
+                if (currentQualityMode == 0) maxTextureSize = 512f;
+                else if (currentQualityMode == 2) maxTextureSize = 2048.0f;
+                else maxTextureSize = 1024.0f;
             }
             else
             {
-                // OFF: 物理的な広がりを採用
-                float capPadding = Math.Min(safePadding, 8000.0f);
+                // クリッピングなし (ハードウェア制限まで許可)
+                finalHalfWidth = inputHalfW + safePadding;
+                finalHalfHeight = inputHalfH + safePadding;
 
-                finalHalfWidth = inputHalfW + capPadding;
-                finalHalfHeight = inputHalfH + capPadding;
-
-                // OFFのときは制限開放
-                maxTextureSize = 16000.0f;
+                finalHalfWidth = Math.Min(finalHalfWidth, ABSOLUTE_MAX_HALF_DIM);
+                finalHalfHeight = Math.Min(finalHalfHeight, ABSOLUTE_MAX_HALF_DIM);
+                maxTextureSize = 8192.0f;
             }
 
             var safeRect = new Vector4(
@@ -181,35 +198,43 @@ namespace Glowplus
                 centerY + finalHalfHeight
             );
 
+            // --- UV座標上の中心位置計算 ---
+            // YMM4のピクセル座標を、Shader用の正規化UV(0.0～1.0)に変換
+            float safeWidth = safeRect.Z - safeRect.X;
+            float safeHeight = safeRect.W - safeRect.Y;
+            float normalizedCenterX = 0.5f + (rayCenterX / Math.Max(1.0f, safeWidth));
+            float normalizedCenterY = 0.5f + (rayCenterY / Math.Max(1.0f, safeHeight));
+            float rayCenterX_Pixel = centerX + rayCenterX;
+            float rayCenterY_Pixel = centerY + rayCenterY;
+            float chromaCenterX_Pixel = centerX + chromaCenterX;
+            float chromaCenterY_Pixel = centerY + chromaCenterY;
+
             // --- 4. 解像度リミッター ---
-            float currentW = safeRect.Z - safeRect.X;
-            float currentH = safeRect.W - safeRect.Y;
+            float currentW = safeWidth;
+            float currentH = safeHeight;
             float maxDim = Math.Max(currentW, currentH);
 
             float autoDownscale = 1.0f;
-            // 指定された maxTextureSize を超える場合のみ縮小
-            if (maxDim > maxTextureSize)
-            {
-                autoDownscale = maxTextureSize / maxDim;
-            }
+            if (maxDim > maxTextureSize) autoDownscale = maxTextureSize / maxDim;
 
             float renderScale = 1.0f;
             if (currentQualityMode == 0) renderScale = 0.5f;
-            else if (currentQualityMode == 1)
-            {
-                // ★修正点2: バランスモードは autoDownscale (maxTextureSize) に任せる
-                // 下手に分岐させると挙動が読みづらくなるのでシンプルに
-                renderScale = 1.0f;
-            }
+            else if (currentQualityMode == 1) renderScale = 1.0f;
 
-            // リミッター適用 (これでStep5の時も 2500px / 4000px = 0.6倍 程度に落ちて軽くなる)
             renderScale = Math.Min(renderScale, autoDownscale);
             renderScale = Math.Max(renderScale, 0.05f);
 
-            // --- 5. 前処理パイプライン ---
+            // 入力画像の透明パディング
+            using (var floodOut = _padFlood.Output)
+            {
+                _padComposite.SetInput(0, floodOut, true);
+            }
+            _padComposite.SetInput(1, this.input, true);
+            ID2D1Image paddedInput = _padComposite.Output;
 
+            // --- 5. 前処理パイプライン ---
             _initialCrop.Rectangle = safeRect;
-            _initialCrop.SetInput(0, this.input, true);
+            _initialCrop.SetInput(0, paddedInput, true);
             ID2D1Image processingImage = _initialCrop.Output;
             bool processingImageIsOwned = true;
 
@@ -250,7 +275,6 @@ namespace Glowplus
             // --- 6. ブラーピラミッド ---
             EnsurePyramidLevels(dc, steps);
 
-            // 事前ダウンスケール
             if (renderScale < 0.99f)
             {
                 var level0 = _pyramidLevels[0];
@@ -274,7 +298,6 @@ namespace Glowplus
 
             float scaledSigma = baseBlurSigma * renderScale;
 
-            // ブラー処理ループ
             for (int i = 0; i < steps; i++)
             {
                 var level = _pyramidLevels[i];
@@ -326,7 +349,6 @@ namespace Glowplus
                 processingImageIsOwned = false;
             }
 
-            // 合成
             ID2D1Image accumulated = _pyramidLevels[steps - 1].OutputCache!;
             bool accumulatedIsOwned = false;
 
@@ -347,7 +369,6 @@ namespace Glowplus
                 accumulatedIsOwned = true;
             }
 
-            // 仕上げ
             ID2D1Image finalGlowImage = accumulated;
             bool finalGlowIsOwned = accumulatedIsOwned;
 
@@ -362,18 +383,16 @@ namespace Glowplus
                 finalGlowIsOwned = true;
             }
 
-            // 最終安全クロップ
             _finalGlowCrop.Rectangle = safeRect;
             _finalGlowCrop.SetInput(0, finalGlowImage, true);
             var glowCropped = _finalGlowCrop.Output;
             if (finalGlowIsOwned) finalGlowImage.Dispose();
 
-            // ソースのクロップ
             _finalSourceCrop.Rectangle = safeRect;
-            _finalSourceCrop.SetInput(0, this.input, true);
+            _finalSourceCrop.SetInput(0, paddedInput, true);
             var sourceCropped = _finalSourceCrop.Output;
 
-            // シェーダー
+            // --- シェーダーへのパラメータ適用 ---
             _deepGlowEffect.SetInput(0, glowCropped, true);
             _deepGlowEffect.SetInput(1, sourceCropped, true);
 
@@ -382,9 +401,28 @@ namespace Glowplus
             _deepGlowEffect.Exposure = exposure;
             _deepGlowEffect.SourceOpacity = showSource ? sourceOpacity : 0.0f;
             _deepGlowEffect.LinearColor = linear;
-            _deepGlowEffect.Center = new Vector2(centerX, centerY);
-            _deepGlowEffect.RGBScales = new Vector3(1, 1, 1);
             _deepGlowEffect.TintScale = tintScale;
+
+            // ★パラメータの適用
+            _deepGlowEffect.ChromaR = chromaR;
+            _deepGlowEffect.ChromaG = chromaG;
+            _deepGlowEffect.ChromaB = chromaB;
+            _deepGlowEffect.ChromaStyle = chromaStyle;
+            _deepGlowEffect.ChromaAngle = chromaAngle;
+            _deepGlowEffect.ChromaCenterX = chromaCenterX_Pixel;
+            _deepGlowEffect.ChromaCenterY = chromaCenterY_Pixel;
+
+            _deepGlowEffect.RayLength = rayLength;
+            _deepGlowEffect.RayCenterX = rayCenterX_Pixel;
+            _deepGlowEffect.RayCenterY = rayCenterY_Pixel;
+            _deepGlowEffect.RaySamples = (float)raySamples;
+            _deepGlowEffect.RayFalloff = rayFalloff;
+            _deepGlowEffect.RayStyle = rayStyle;
+            _deepGlowEffect.RayAngle = rayAngle;
+
+            _deepGlowEffect.TexWidth = Math.Max(1.0f, safeRect.Z - safeRect.X);
+            _deepGlowEffect.TexHeight = Math.Max(1.0f, safeRect.W - safeRect.Y);
+
 
             if (!colorize)
             {
@@ -404,6 +442,7 @@ namespace Glowplus
 
             glowCropped.Dispose();
             sourceCropped.Dispose();
+            paddedInput.Dispose();
 
             return effectDescription.DrawDescription;
         }
@@ -475,6 +514,7 @@ namespace Glowplus
 
         public void Dispose()
         {
+            // （既存のDispose群）
             _thresholdEffect?.SetInput(0, null, true); _thresholdEffect?.Dispose(); _thresholdEffect = null;
             _saturationEffect?.SetInput(0, null, true); _saturationEffect?.Dispose(); _saturationEffect = null;
             _finalUpscaler?.SetInput(0, null, true); _finalUpscaler?.Dispose(); _finalUpscaler = null;
@@ -483,6 +523,10 @@ namespace Glowplus
             _finalGlowCrop?.SetInput(0, null, true); _finalGlowCrop?.Dispose(); _finalGlowCrop = null;
             _deepGlowEffect?.SetInput(0, null, true); _deepGlowEffect?.SetInput(1, null, true); _deepGlowEffect?.Dispose(); _deepGlowEffect = null;
             _preBlurCrop?.SetInput(0, null, true); _preBlurCrop?.Dispose(); _preBlurCrop = null;
+
+            _padFlood?.Dispose(); _padFlood = null;
+            _padComposite?.SetInput(0, null, true); _padComposite?.SetInput(1, null, true); _padComposite?.Dispose(); _padComposite = null;
+
             _lastOutput?.Dispose(); _lastOutput = null;
             foreach (var level in _pyramidLevels) level.Dispose();
             _pyramidLevels.Clear();
@@ -491,6 +535,7 @@ namespace Glowplus
 
         private class PyramidLevel : IDisposable
         {
+            // （既存のまま）
             public Scale Downscaler;
             public DirectionalBlur BlurX;
             public DirectionalBlur BlurY;
@@ -501,20 +546,11 @@ namespace Glowplus
 
             public PyramidLevel(ID2D1DeviceContext dc)
             {
-                Downscaler = new Scale(dc);
-                Downscaler.SetValue((int)ScaleProperties.InterpolationMode, InterpolationMode.Linear);
-                BlurX = new DirectionalBlur(dc);
-                BlurX.Optimization = DirectionalBlurOptimization.Speed;
-                BlurX.BorderMode = BorderMode.Soft;
-                BlurX.Angle = 0f;
-                BlurY = new DirectionalBlur(dc);
-                BlurY.Optimization = DirectionalBlurOptimization.Speed;
-                BlurY.BorderMode = BorderMode.Soft;
-                BlurY.Angle = 90f;
-                Upscaler = new Scale(dc);
-                Upscaler.SetValue((int)ScaleProperties.InterpolationMode, InterpolationMode.Linear);
-                Blender = new Vortice.Direct2D1.Effects.Blend(dc);
-                Blender.Mode = BlendMode.LinearDodge;
+                Downscaler = new Scale(dc); Downscaler.SetValue((int)ScaleProperties.InterpolationMode, InterpolationMode.Linear);
+                BlurX = new DirectionalBlur(dc); BlurX.Optimization = DirectionalBlurOptimization.Speed; BlurX.BorderMode = BorderMode.Soft; BlurX.Angle = 0f;
+                BlurY = new DirectionalBlur(dc); BlurY.Optimization = DirectionalBlurOptimization.Speed; BlurY.BorderMode = BorderMode.Soft; BlurY.Angle = 90f;
+                Upscaler = new Scale(dc); Upscaler.SetValue((int)ScaleProperties.InterpolationMode, InterpolationMode.Linear);
+                Blender = new Vortice.Direct2D1.Effects.Blend(dc); Blender.Mode = BlendMode.LinearDodge;
                 Cropper = new Crop(dc);
             }
             public void ClearCache() { OutputCache?.Dispose(); OutputCache = null; }
