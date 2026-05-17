@@ -457,7 +457,7 @@ namespace Glowplus
             if (Application.Current == null) return;
             try
             {
-                Application.Current.Dispatcher.Invoke(() =>
+                Application.Current.Dispatcher.InvokeAsync(() =>
                 {
                     var window = GetYmmMainWindow();
                     if (window == null) return;
