@@ -43,6 +43,9 @@ namespace Glowplus
         public float ChromaCenterX { set => SetValue((int)Props.ChromaCenterX, value); }
         public float ChromaCenterY { set => SetValue((int)Props.ChromaCenterY, value); }
 
+        // ★新規：黒ずみ軽減のON/OFF
+        public bool ClampAlpha { set => SetValue((int)Props.ClampAlpha, value ? 1.0f : 0.0f); }
+
         public GlowplusCustomEffect(IGraphicsDevicesAndContext devices) : base(Create<EffectImpl>(devices)) { }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -80,13 +83,20 @@ namespace Glowplus
             public float ChromaAngle;       // 4
             public float ChromaCenterX;     // 4
             public float ChromaCenterY;     // 4 -> 16
+
+            // ★新規：定数バッファアライメント（16バイト境界）に沿ってダミーを追加
+            public float ClampAlpha;        // 4
+            public float Dummy1;            // 4
+            public float Dummy2;            // 4
+            public float Dummy3;            // 4 -> 16
         }
 
         private enum Props
         {
             InnerColor, OuterColor, TintScale, TintGamma, Exposure, SourceOpacity, Colorize, Threshold, MixingMode, LinearColor,
             ChromaR, ChromaG, ChromaB, RayLength, RayCenterX, RayCenterY, RaySamples, TexWidth, TexHeight,
-            RayFalloff, RayStyle, RayAngle, ChromaStyle, ChromaAngle, ChromaCenterX, ChromaCenterY
+            RayFalloff, RayStyle, RayAngle, ChromaStyle, ChromaAngle, ChromaCenterX, ChromaCenterY,
+            ClampAlpha // ★新規
         }
 
         [CustomEffect(2)]
@@ -161,7 +171,11 @@ namespace Glowplus
                     ChromaStyle = 0f,
                     ChromaAngle = 0f,
                     ChromaCenterX = 0f,
-                    ChromaCenterY = 0f
+                    ChromaCenterY = 0f,
+                    ClampAlpha = 1.0f, // ★初期値ON
+                    Dummy1 = 0f,
+                    Dummy2 = 0f,
+                    Dummy3 = 0f
                 };
             }
 
@@ -191,6 +205,9 @@ namespace Glowplus
             [CustomEffectProperty(PropertyType.Float, (int)Props.ChromaAngle)] public float ChromaAngle { get => constants.ChromaAngle; set { constants.ChromaAngle = value; UpdateConstants(); } }
             [CustomEffectProperty(PropertyType.Float, (int)Props.ChromaCenterX)] public float ChromaCenterX { get => constants.ChromaCenterX; set { constants.ChromaCenterX = value; UpdateConstants(); } }
             [CustomEffectProperty(PropertyType.Float, (int)Props.ChromaCenterY)] public float ChromaCenterY { get => constants.ChromaCenterY; set { constants.ChromaCenterY = value; UpdateConstants(); } }
+
+            // ★新規追加
+            [CustomEffectProperty(PropertyType.Float, (int)Props.ClampAlpha)] public float ClampAlpha { get => constants.ClampAlpha; set { constants.ClampAlpha = value; UpdateConstants(); } }
         }
     }
 }

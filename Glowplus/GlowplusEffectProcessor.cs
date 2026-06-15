@@ -91,6 +91,7 @@ namespace Glowplus
             float mixingMode = (float)item.MixingMode;
             float sourceOpacity = (float)item.SourceOpacity.GetValue(frame, length, fps) / 100.0f;
             bool linear = item.LinearColor;
+            bool clampAlpha = item.ClampAlpha; // ★新規：UI上のトグル状態を取得
             var currentQualityMode = (int)item.QualityMode;
             bool autoClipping = item.AutoClipping;
             bool fixToOriginalSize = item.FixToOriginalSize;
@@ -134,7 +135,7 @@ namespace Glowplus
             // --- 3. 座標計算とクリッピング判定 ---
             var bounds = dc.GetImageLocalBounds(this.input);
 
-            // ① 無限大の場合はプロジェクトサイズにフォールバック（背景アイテム等への対応・既存のまま）
+            // ① 無限大の場合はプロジェクトサイズにフォールバック
             if (float.IsInfinity(bounds.Left) || float.IsInfinity(bounds.Right) || Math.Abs(bounds.Right - bounds.Left) > 500000)
             {
                 float halfW = projectWidth / 2.0f;
@@ -142,10 +143,9 @@ namespace Glowplus
                 bounds = new Vortice.RawRectF(-halfW, -halfH, halfW, halfH);
             }
 
-            // ★② 新規追加：バグ回避（アイテムサイズが0、つまり何も描画されていない場合）
+            // ② アイテムサイズが0（描画物がない）のバグ回避
             if (float.IsNaN(bounds.Left) || (bounds.Right - bounds.Left) <= 0.1f || (bounds.Bottom - bounds.Top) <= 0.1f)
             {
-                // エフェクトをかけずに、安全に入力をパススルーして終わる
                 using (var floodOut = _padFlood.Output)
                 {
                     _padComposite.SetInput(0, floodOut, true);
@@ -172,7 +172,7 @@ namespace Glowplus
             float finalHalfWidth, finalHalfHeight;
             float maxTextureSize;
 
-            // ★ ハードウェア限界を考慮した絶対的な最大サイズ (直径が12000程度に収まるように)
+            // ハードウェア限界を考慮した絶対的な最大サイズ (直径が12000程度に収まるように)
             float ABSOLUTE_MAX_HALF_DIM = 6000.0f;
 
             if (fixToOriginalSize)
@@ -207,8 +207,6 @@ namespace Glowplus
             // --- UV座標上の中心位置計算 ---
             float safeWidth = safeRect.Z - safeRect.X;
             float safeHeight = safeRect.W - safeRect.Y;
-            float normalizedCenterX = 0.5f + (rayCenterX / Math.Max(1.0f, safeWidth));
-            float normalizedCenterY = 0.5f + (rayCenterY / Math.Max(1.0f, safeHeight));
             float rayCenterX_Pixel = centerX + rayCenterX;
             float rayCenterY_Pixel = centerY + rayCenterY;
             float chromaCenterX_Pixel = centerX + chromaCenterX;
@@ -229,7 +227,7 @@ namespace Glowplus
             renderScale = Math.Min(renderScale, autoDownscale);
             renderScale = Math.Max(renderScale, 0.05f);
 
-            // ★ メモリリーク修正：入力画像の透明パディング
+            // メモリリーク修正：入力画像の透明パディング
             using (var floodOut = _padFlood.Output)
             {
                 _padComposite.SetInput(0, floodOut, true);
@@ -428,6 +426,8 @@ namespace Glowplus
             _deepGlowEffect.TexWidth = Math.Max(1.0f, safeRect.Z - safeRect.X);
             _deepGlowEffect.TexHeight = Math.Max(1.0f, safeRect.W - safeRect.Y);
 
+            // ★新規：黒ずみ軽減のON/OFFパラメータ適用
+            _deepGlowEffect.ClampAlpha = clampAlpha;
 
             if (!colorize)
             {
@@ -519,7 +519,6 @@ namespace Glowplus
 
         public void Dispose()
         {
-            // （既存のDispose群）
             _thresholdEffect?.SetInput(0, null, true); _thresholdEffect?.Dispose(); _thresholdEffect = null;
             _saturationEffect?.SetInput(0, null, true); _saturationEffect?.Dispose(); _saturationEffect = null;
             _finalUpscaler?.SetInput(0, null, true); _finalUpscaler?.Dispose(); _finalUpscaler = null;
@@ -540,7 +539,6 @@ namespace Glowplus
 
         private class PyramidLevel : IDisposable
         {
-            // （既存のまま）
             public Scale Downscaler;
             public DirectionalBlur BlurX;
             public DirectionalBlur BlurY;

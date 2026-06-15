@@ -32,6 +32,12 @@ cbuffer Constants : register(b0)
     float chromaAngle;
     float chromaCenterX;
     float chromaCenterY;
+
+    // ★新規：C#側の定数バッファアライメント（16バイト境界）に完璧に一致させます
+    float clampAlpha;
+    float dummy1;
+    float dummy2;
+    float dummy3;
 };
 
 Texture2D<float4> InputTexture : register(t0);
@@ -85,7 +91,7 @@ float4 main(
     float2 rayCenterPixel = float2(rayCenterX, rayCenterY);
     float2 chromaCenterPixel = float2(chromaCenterX, chromaCenterY);
     
-    // ★ タイル分割バグ回避：ピクセル単位の移動量をUV空間に変換するための偏微分
+    // タイリングバグ回避：ピクセル単位の移動量をUV空間に変換するための微分
     float2 duvdx = ddx(uv0.xy);
     float2 duvdy = ddy(uv0.xy);
     
@@ -101,7 +107,7 @@ float4 main(
         float2 offsetPixel;
         float weight;
         
-        // ★ 放射光のスタイル分岐
+        // 放射・平行のスタイル分岐
         if (rayStyle > 0.5)
         {
             // Directional
@@ -125,11 +131,11 @@ float4 main(
             weight = pow(max(1.0 - ratio, 0.0), rayFalloff);
         }
         
-        // ピクセルオフセットを正しくUVオフセットに変換
+        // ピクセルオフセットを正確なUVオフセットに変換
         float2 currentRayOffsetUV = PixelToUVOffset(offsetPixel, duvdx, duvdy);
         float2 baseUV = uv0.xy - currentRayOffsetUV;
 
-        // ★ 色収差のスタイル分岐
+        // 色収差のスタイル分岐
         float2 chromaOffsetR, chromaOffsetG, chromaOffsetB;
         if (chromaStyle > 0.5)
         {
@@ -155,7 +161,7 @@ float4 main(
             chromaOffsetB = cDirUV * chromaB;
         }
 
-        // サンプリング座標の決定
+        // サンプリング位置の決定
         float2 uvR = baseUV - chromaOffsetR;
         float2 uvG = baseUV - chromaOffsetG;
         float2 uvB = baseUV - chromaOffsetB;
@@ -164,7 +170,7 @@ float4 main(
         float g = SampleSafe(InputTexture, InputSampler, uvG).g;
         float b = SampleSafe(InputTexture, InputSampler, uvB).b;
         
-        // Alphaは色欠けを防ぐためにRGBの最大値とベースのAを考慮
+        // Alphaは色収差による欠損を防ぐためRGBの最大値とベースのAの最大値
         float a = SampleSafe(InputTexture, InputSampler, baseUV).a;
         a = max(a, max(r, max(g, b)));
         
@@ -174,7 +180,7 @@ float4 main(
     
     float4 glow = sumGlow / max(totalWeight, 0.0001);
 
-    // 以降、既存の着色・ブレンド処理
+    // 以降、色の着色・ブレンド処理
     float3 mixInner = innerColor.rgb;
     float3 mixOuter = outerColor.rgb;
     
@@ -206,7 +212,14 @@ float4 main(
 
     finalGlowRGB *= exposure;
     
-    // --- 合成処理 ---
+    // ★新規：トグルがONの時のみ、アルファ値を光の明るさ以下にクランプして透明化
+    if (clampAlpha > 0.5)
+    {
+        float maxGlowRGB = max(finalGlowRGB.r, max(finalGlowRGB.g, finalGlowRGB.b));
+        finalAlpha = min(finalAlpha, maxGlowRGB);
+    }
+    
+    // --- ソース画像との合成 ---
     float4 source = SampleSafe(SourceTexture, InputSampler, uv1.xy);
     source.a *= sourceOpacity;
     source.rgb *= sourceOpacity;
@@ -220,7 +233,7 @@ float4 main(
     if (linearColor > 0.5)
         finalRGB = LinearToSRGB(finalRGB);
 
-    // ディザリング (バンディング・等高線ノイズの防止)
+    // ディザリング（バンディング・マッハバンドの防止）
     float noise = (rand(uv0.xy) - 0.5) / 255.0;
     finalRGB += noise;
 

@@ -201,6 +201,12 @@ namespace Glowplus
         public bool LinearColor { get => linearColor; set => Set(ref linearColor, value); }
         private bool linearColor = true;
 
+        // ★新規追加：黒ずみ軽減のON/OFFトグル
+        [Display(GroupName = "合成", Name = "黒ずみ軽減", Description = "ONにすると、光のフチの不要な黒ずみ（背景の過度な削れ）を防ぎます。")]
+        [ToggleSlider]
+        public bool ClampAlpha { get => clampAlpha; set => Set(ref clampAlpha, value); }
+        private bool clampAlpha = false;
+
         [Display(GroupName = "合成", Name = "合成モード", Description = "いい感じの色になったやつと、物理的に正しい混ざり方のやつ。")]
         [EnumComboBox]
         public GlowMixingMode MixingMode { get => mixingMode; set => Set(ref mixingMode, value); }
